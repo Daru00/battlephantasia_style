@@ -1,0 +1,138 @@
+#===============================================================================
+# Battle Fantasia Style RPG System - Universal Module
+# Save file goes to the main game /save/ folder
+#===============================================================================
+
+[StateDef -4]
+ignoreHitPause if isHelper {
+} else {
+
+  # ============================================================
+  # PLAYER SIDE (Human)
+  # ============================================================
+  if AILevel = 0 && teamSide = 1 {
+
+    # Load from main save folder
+    if map(_rpg_loaded) = 0 {
+      loadFile{
+        savedata: map;
+        path: "../../save/rpg_data.gob";
+      }
+      map(_rpg_loaded) := 1;
+    }
+
+    # Defaults
+    if map(rpg_level) <= 0 {
+      map(rpg_level)     := 1;
+      map(rpg_exp)       := 0;
+      map(rpg_exp_next)  := 18;
+      map(rpg_atk)       := 100;
+      map(rpg_def)       := 100;
+    }
+
+    # Apply attack multiplier
+    attackMulSet{value: map(rpg_atk) / 100.0}
+
+    # EXP Gain
+    if roundState = 4 && time = 1 {
+      if win {
+        map(rpg_exp) := map(rpg_exp) + ifelse(winKO, 12, 7);
+
+        if winKO {
+          text{
+            removetime: 150;
+            text: "Hyper Finish! +12 EXP";
+            font: 0;
+            pos: 260, 270;
+            align: 0;
+            scale: 2.1, 2.1;
+            layerno: 2;
+          }
+        } else {
+          text{
+            removetime: 150;
+            text: "+7 EXP";
+            font: 0;
+            pos: 160, 70;
+            align: 0;
+            scale: 2.1, 2.1;
+            layerno: 2;
+          }
+        }
+      }
+
+      # Level up
+      while map(rpg_exp) >= map(rpg_exp_next) {
+        map(rpg_exp)      := map(rpg_exp) - map(rpg_exp_next);
+        map(rpg_level)    := map(rpg_level) + 1;
+        map(rpg_atk)      := map(rpg_atk) + 3;
+        map(rpg_def)      := map(rpg_def) + 2;
+        map(rpg_exp_next) := 18 + (map(rpg_level) * 6);
+
+        text{
+          removetime: 180;
+          text: "LEVEL UP!";
+          font: 0;
+          pos: 360, 340;
+          align: 0;
+          scale: 3.5, 3.5;
+          layerno: 2;
+        }
+      }
+
+      # Save to main save folder
+      saveFile{
+        savedata: map;
+        path: "../../save/rpg_data.gob";
+      }
+    }
+
+    # ===== BOTTOM HUD (simplest possible method) =====
+    if roundState >= 2 {
+
+      text{
+        removetime: 2;
+        text: "Lv.%d   EXP %d/%d   STR %d   DEF %d";
+        params: map(rpg_level), map(rpg_exp), map(rpg_exp_next), map(rpg_atk), map(rpg_def);
+        font: -1;
+        pos: 10, screenHeight - 86;
+        align: 1;
+        scale: 1.0, 1.0;
+        layerno: 2;
+      }
+    }
+}
+  # ============================================================
+  # CPU SIDE
+  # ============================================================
+  if AILevel > 0 {
+
+    if map(_cpu_scaled) = 0 && roundState <= 1 {
+
+      map(_base_atk) := 100;
+      map(_base_def) := 100;
+      map(_base_hp)  := 1000;
+
+      map(_match) := ifelse(matchno > 0, matchno, AILevel);
+
+      map(_mult) := 1.0 + (map(_match) - 1) * 0.18;
+
+      if map(_match) = 3 { map(_mult) := 1.50; }
+      if map(_match) = 4 { map(_mult) := 0.90; }
+      if map(_match) = 6 { map(_mult) := 1.65; }
+      if map(_match) = 8 { map(_mult) := 1.90; }
+
+      map(_rand) := 0.85 + (random / 1000.0 * 0.30);
+
+      map(rpg_atk) := floor(map(_base_atk) * map(_mult) * map(_rand));
+      map(rpg_def) := floor(map(_base_def) * map(_mult) * map(_rand));
+      map(rpg_hp)  := floor(map(_base_hp)  * map(_mult) * map(_rand));
+
+      map(_cpu_scaled) := 1;
+    }
+
+    if map(_cpu_scaled) = 1 {
+      attackMulSet{value: map(rpg_atk) / 100.0}
+    }
+  }
+}

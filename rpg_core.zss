@@ -1,12 +1,11 @@
 #===============================================================================
-# Battle Fantasia Style RPG System - Universal Module
+# Battle Fantasia Style RPG System - Universal Module (v2)
 # Save file goes to the main game /save/ folder
+# Ikemen GO zss module
 #===============================================================================
-
 [StateDef -4]
 ignoreHitPause if isHelper {
 } else {
-
   # ============================================================
   # PLAYER SIDE (Human)
   # ============================================================
@@ -30,28 +29,78 @@ ignoreHitPause if isHelper {
       map(rpg_def)       := 100;
     }
 
-    # Apply attack multiplier
+    # Apply attack / defence multipliers
     attackMulSet{value: map(rpg_atk) / 100.0}
+    defenceMulSet{value: 100.0 / map(rpg_def)}
 
-    # EXP Gain
+    # ===== HIT TRACKING (used to detect debug/F1 instant-KO wins) =====
+    # F1 in Ikemen's debug keys sets p2's life to 0 directly - it isn't a
+    # real win, so a "win" with zero landed hits this round is treated as
+    # invalid and earns no EXP.
+    if roundState <= 1 {
+      map(_hits_landed)  := 0;
+      map(_prev_contact) := 0;
+    }
+    if moveContact = 1 && map(_prev_contact) = 0 {
+      map(_hits_landed) := map(_hits_landed) + 1;
+    }
+    map(_prev_contact) := ifelse(moveContact = 1, 1, 0);
+
+    # ===== EXP GAIN =====
+    # Rules:
+    #   Draw / no-decision round     -> 0 EXP
+    #   Win with 0 hits landed (F1)  -> 0 EXP (debug/invalid win)
+    #   Lose                         -> small EXP (still progresses)
+    #   Win (normal)                 -> medium EXP
+    #   Win (hyper / special)        -> big EXP
     if roundState = 4 && time = 1 {
-      if win {
-        map(rpg_exp) := map(rpg_exp) + ifelse(winKO, 12, 7);
 
-        if winKO {
+      map(_gained_exp) := 0;
+
+      if win {
+        if map(_hits_landed) = 0 {
+          # Debug/F1 instant-KO: not a real win, no EXP
+          map(_gained_exp) := 0;
           text{
             removetime: 150;
-            text: "Hyper Finish! +12 EXP";
+            text: "No EXP (Debug KO)";
             font: 0;
-            pos: 260, 270;
+            pos: 160, 70;
             align: 0;
             scale: 2.1, 2.1;
             layerno: 2;
           }
         } else {
+          if winHyper || winSpecial {
+            map(_gained_exp) := 12;
+            text{
+              removetime: 150;
+              text: "Hyper Finish! +12 EXP";
+              font: 0;
+              pos: 260, 270;
+              align: 0;
+              scale: 2.1, 2.1;
+              layerno: 2;
+            }
+          } else {
+            map(_gained_exp) := 7;
+            text{
+              removetime: 150;
+              text: "+7 EXP";
+              font: 0;
+              pos: 160, 70;
+              align: 0;
+              scale: 2.1, 2.1;
+              layerno: 2;
+            }
+          }
+        }
+      } else {
+        if lose {
+          map(_gained_exp) := 3;
           text{
             removetime: 150;
-            text: "+7 EXP";
+            text: "+3 EXP";
             font: 0;
             pos: 160, 70;
             align: 0;
@@ -59,19 +108,40 @@ ignoreHitPause if isHelper {
             layerno: 2;
           }
         }
+        # drawGame (a.k.a. no-decision round) intentionally falls through
+        # with _gained_exp left at 0 and no popup text.
       }
 
-      # Level up
-      while map(rpg_exp) >= map(rpg_exp_next) {
-        map(rpg_exp)      := map(rpg_exp) - map(rpg_exp_next);
-        map(rpg_level)    := map(rpg_level) + 1;
-        map(rpg_atk)      := map(rpg_atk) + 3;
-        map(rpg_def)      := map(rpg_def) + 2;
-        map(rpg_exp_next) := 18 + (map(rpg_level) * 6);
+      if map(_gained_exp) > 0 {
+        map(rpg_exp) := map(rpg_exp) + map(_gained_exp);
+      }
 
+      # ===== LEVEL UP (single popup even for multi-level jumps) =====
+      map(_levels_gained) := 0;
+      while map(rpg_exp) >= map(rpg_exp_next) {
+        map(rpg_exp)       := map(rpg_exp) - map(rpg_exp_next);
+        map(rpg_level)     := map(rpg_level) + 1;
+        map(rpg_atk)       := map(rpg_atk) + 3;
+        map(rpg_def)       := map(rpg_def) + 2;
+        map(rpg_exp_next)  := 18 + (map(rpg_level) * 6);
+        map(_levels_gained):= map(_levels_gained) + 1;
+      }
+      if map(_levels_gained) = 1 {
         text{
           removetime: 180;
           text: "LEVEL UP!";
+          font: 0;
+          pos: 360, 340;
+          align: 0;
+          scale: 3.5, 3.5;
+          layerno: 2;
+        }
+      }
+      if map(_levels_gained) > 1 {
+        text{
+          removetime: 180;
+          text: "LEVEL UP x%d!";
+          params: map(_levels_gained);
           font: 0;
           pos: 360, 340;
           align: 0;
@@ -87,9 +157,8 @@ ignoreHitPause if isHelper {
       }
     }
 
-    # ===== BOTTOM HUD (simplest possible method) =====
+    # ===== BOTTOM HUD =====
     if roundState >= 2 {
-
       text{
         removetime: 2;
         text: "Lv.%d   EXP %d/%d   STR %d   DEF %d";
@@ -101,7 +170,8 @@ ignoreHitPause if isHelper {
         layerno: 2;
       }
     }
-}
+  }
+
   # ============================================================
   # CPU SIDE
   # ============================================================
@@ -109,30 +179,54 @@ ignoreHitPause if isHelper {
 
     if map(_cpu_scaled) = 0 && roundState <= 1 {
 
-      map(_base_atk) := 100;
-      map(_base_def) := 100;
-      map(_base_hp)  := 1000;
+      # Read (not overwrite) the human player's current stats so CPU
+      # difficulty tracks how strong the player has actually grown.
+      loadFile{
+        savedata: map;
+        path: "../../save/rpg_data.gob";
+      }
+      map(_player_atk) := ifelse(map(rpg_atk) > 0, map(rpg_atk), 100);
+      map(_player_def) := ifelse(map(rpg_def) > 0, map(rpg_def), 100);
 
-      map(_match) := ifelse(matchno > 0, matchno, AILevel);
+      # ----- Tier from arcade.maxmatches = 6,1,1,0,0,0,0,0,0,0 -----
+      # matchno 1-6  -> tier 1 (grunts)
+      # matchno 7    -> tier 2 (sub-boss)
+      # matchno 8+   -> tier 3 (final boss, toughest overall)
+      map(_match) := ifelse(matchno > 0, matchno, 1);
+      if map(_match) <= 6 {
+        map(_tier) := 1;
+      } else {
+        if map(_match) = 7 {
+          map(_tier) := 2;
+        } else {
+          map(_tier) := 3;
+        }
+      }
 
-      map(_mult) := 1.0 + (map(_match) - 1) * 0.18;
+      # Tier base multiplier (applied on top of the player's own stats)
+      if map(_tier) = 1 { map(_tier_mult) := 0.90; }
+      if map(_tier) = 2 { map(_tier_mult) := 1.15; }
+      if map(_tier) = 3 { map(_tier_mult) := 1.45; }
 
-      if map(_match) = 3 { map(_mult) := 1.50; }
-      if map(_match) = 4 { map(_mult) := 0.90; }
-      if map(_match) = 6 { map(_mult) := 1.65; }
-      if map(_match) = 8 { map(_mult) := 1.90; }
+      # Small per-fight randomness so same tier doesn't feel identical
+      map(_rand_atk) := 0.95 + (random / 1000.0 * 0.15);
+      map(_rand_def) := 0.95 + (random / 1000.0 * 0.15);
+      map(_rand_hp)  := 0.95 + (random / 1000.0 * 0.15);
 
-      map(_rand) := 0.85 + (random / 1000.0 * 0.30);
-
-      map(rpg_atk) := floor(map(_base_atk) * map(_mult) * map(_rand));
-      map(rpg_def) := floor(map(_base_def) * map(_mult) * map(_rand));
-      map(rpg_hp)  := floor(map(_base_hp)  * map(_mult) * map(_rand));
+      map(rpg_atk) := floor(map(_player_atk) * map(_tier_mult) * map(_rand_atk));
+      map(rpg_def) := floor(map(_player_def) * map(_tier_mult) * map(_rand_def));
+      map(rpg_hp)  := floor(1000 * map(_tier_mult) * map(_rand_hp));
 
       map(_cpu_scaled) := 1;
     }
 
     if map(_cpu_scaled) = 1 {
       attackMulSet{value: map(rpg_atk) / 100.0}
+      defenceMulSet{value: 100.0 / map(rpg_def)}
+      if roundState <= 1 {
+        ModifyPlayer{lifemax: map(rpg_hp)}
+        lifeSet{value: map(rpg_hp)}
+      }
     }
   }
 }

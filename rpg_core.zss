@@ -1,94 +1,145 @@
 #===============================================================================
-# Battle Fantasia Style RPG System - Universal Module (v2)
-# Save file goes to the main game /save/ folder
+# Battle Fantasia Style RPG System - Universal Module (v5)
 # Ikemen GO zss module
+#
+# Each character keeps its OWN save file ("rpg_data.gob") inside its own
+# character folder, so levels / EXP / rank never mix between characters.
+#
+# EXP curve: EXP needed to leave level L = 20 + 0.40803 * L^3
+#   -> total EXP from level 1 to level 100 is about 9,999,999. Level cap = 100.
+#
+# Rank nicknames (by level, differ by sex - read from map(sex), set in the
+# character def's [Map] section: sex = 1 (male) / 2 (female)):
+#   Lv   1      5         10       15        20        30       40
+#   Male   Rookie  Fighter  Veteran  Elite     Champion  Master   Legend
+#   Female Maiden  Huntress Heroine  Valkyrie  Queen     Empress  Goddess
+#
+# v5 = v4 + your tuned 1280x720 positions (P2/P4 use screenWidth--950)
+# v4 CHANGES
+#   - Sex is protected from loadFile (saved map can no longer overwrite it)
+#     and map(_female) is recomputed EVERY frame from map(sex).
+#   - HUD has an editable position block per player (P1/P2/P3/P4).
+#   - Outline text uses plain color 0,0,0 on layer 1, white text on layer 2.
 #===============================================================================
 [StateDef -4]
 ignoreHitPause if isHelper {
 } else {
-  # ============================================================
-  # PLAYER SIDE (Human)
-  # ============================================================
-  if AILevel = 0 && teamSide = 1 {
 
-    # Load from main save folder
+  # ============================================================
+  # HUMAN SIDE
+  # ============================================================
+  if AILevel = 0 {
+
+    # ----- Load this character's own save once -----
     if map(_rpg_loaded) = 0 {
+      # Local variable: loadFile cannot overwrite it (map values can be)
+      let sex_def = map(sex);
+
       loadFile{
         savedata: map;
-        path: "../../save/rpg_data.gob";
+        path: "rpg_data.gob";
       }
       map(_rpg_loaded) := 1;
+
+      # Sex always comes from the def, never from the save file
+      map(sex) := $sex_def;
+
+      # Defaults for a fresh character
+      if map(rpg_level) <= 0 {
+        map(rpg_level)    := 1;
+        map(rpg_exp)      := 0;
+        map(rpg_exp_next) := 18;
+        map(rpg_atk)      := 100;
+        map(rpg_def)      := 100;
+      }
+
+      # Always rebuild the requirement from the level
+      map(rpg_exp_next) := 20 + floor(0.40803 * map(rpg_level) * map(rpg_level) * map(rpg_level));
     }
 
-    # Defaults
-    if map(rpg_level) <= 0 {
-      map(rpg_level)     := 1;
-      map(rpg_exp)       := 0;
-      map(rpg_exp_next)  := 18;
-      map(rpg_atk)       := 100;
-      map(rpg_def)       := 100;
+    # ----- Female flag: recomputed EVERY frame from map(sex) -----
+    map(_female) := ifelse(map(sex) = 2, 1, 0);
+
+    # ----- Rank from level -----
+    map(_rank_now) := 1;
+    if map(rpg_level) >= 5  { map(_rank_now) := 2; }
+    if map(rpg_level) >= 10 { map(_rank_now) := 3; }
+    if map(rpg_level) >= 15 { map(_rank_now) := 4; }
+    if map(rpg_level) >= 20 { map(_rank_now) := 5; }
+    if map(rpg_level) >= 30 { map(_rank_now) := 6; }
+    if map(rpg_level) >= 40 { map(_rank_now) := 7; }
+    # Old saves / new chars: sync silently (no fake rank-up popup)
+    if map(rpg_rank) <= 0 {
+      map(rpg_rank) := map(_rank_now);
     }
 
-    # Apply attack / defence multipliers
+    # ----- Apply multipliers -----
+    # NOTE: if DEF seems to make you take MORE damage in testing, swap this
+    # line to: defenceMulSet{value: map(rpg_def) / 100.0}
     attackMulSet{value: map(rpg_atk) / 100.0}
     defenceMulSet{value: 100.0 / map(rpg_def)}
 
-    # ===== HIT TRACKING (used to detect debug/F1 instant-KO wins) =====
-    # F1 in Ikemen's debug keys sets p2's life to 0 directly - it isn't a
-    # real win, so a "win" with zero landed hits this round is treated as
-    # invalid and earns no EXP.
+    # ===== HIT TRACKING (filters debug/F1 instant-KO wins) =====
     if roundState <= 1 {
       map(_hits_landed)  := 0;
       map(_prev_contact) := 0;
+      map(_prev_elife)   := 0;
+      map(_exp_done)     := 0;
     }
-    if moveContact = 1 && map(_prev_contact) = 0 {
-      map(_hits_landed) := map(_hits_landed) + 1;
+    if roundState >= 2 {
+      if moveContact = 1 && map(_prev_contact) = 0 {
+        map(_hits_landed) := map(_hits_landed) + 1;
+      }
+      if map(_prev_elife) > 0 && (enemy, life) < map(_prev_elife) && (enemy, life) > 0 {
+        map(_hits_landed) := map(_hits_landed) + 1;
+      }
+      map(_prev_contact) := ifelse(moveContact = 1, 1, 0);
+      map(_prev_elife)   := enemy, life;
     }
-    map(_prev_contact) := ifelse(moveContact = 1, 1, 0);
 
-    # ===== EXP GAIN =====
-    # Rules:
-    #   Draw / no-decision round     -> 0 EXP
-    #   Win with 0 hits landed (F1)  -> 0 EXP (debug/invalid win)
-    #   Lose                         -> small EXP (still progresses)
-    #   Win (normal)                 -> medium EXP
-    #   Win (hyper / special)        -> big EXP
-    if roundState = 4 && time = 1 {
-
+    # ===== EXP GAIN (runs exactly once per round) =====
+    #   Draw / no decision        -> 0 EXP
+    #   Win with 0 hits (F1)      -> 0 EXP
+    #   Lose                      -> +3
+    #   Win                       -> +7
+    #   Win (hyper / special)     -> +12
+    if roundState = 4 && map(_exp_done) = 0 {
+      map(_exp_done)   := 1;
       map(_gained_exp) := 0;
+      map(_gain_mul)   := 1.0 + (map(rpg_level) * map(rpg_level) / 7.0);
 
       if win {
         if map(_hits_landed) = 0 {
-          # Debug/F1 instant-KO: not a real win, no EXP
-          map(_gained_exp) := 0;
           text{
             removetime: 150;
             text: "No EXP (Debug KO)";
             font: 0;
-            pos: 160, 70;
+            pos: 460, 270;
             align: 0;
             scale: 2.1, 2.1;
             layerno: 2;
           }
         } else {
           if winHyper || winSpecial {
-            map(_gained_exp) := 12;
+            map(_gained_exp) := floor(12 * map(_gain_mul));
             text{
               removetime: 150;
-              text: "Hyper Finish! +12 EXP";
+              text: "Hyper Finish! +%.0f EXP";
+              params: map(_gained_exp);
               font: 0;
-              pos: 260, 270;
+              pos: 460, 270;
               align: 0;
               scale: 2.1, 2.1;
               layerno: 2;
             }
           } else {
-            map(_gained_exp) := 7;
+            map(_gained_exp) := floor(7 * map(_gain_mul));
             text{
               removetime: 150;
-              text: "+7 EXP";
+              text: "+%.0f EXP";
+              params: map(_gained_exp);
               font: 0;
-              pos: 160, 70;
+              pos: 460, 270;
               align: 0;
               scale: 2.1, 2.1;
               layerno: 2;
@@ -97,34 +148,36 @@ ignoreHitPause if isHelper {
         }
       } else {
         if lose {
-          map(_gained_exp) := 3;
+          map(_gained_exp) := floor(3 * map(_gain_mul));
           text{
             removetime: 150;
-            text: "+3 EXP";
+            text: "+%.0f EXP";
+            params: map(_gained_exp);
             font: 0;
-            pos: 160, 70;
+            pos: 460, 270;
             align: 0;
             scale: 2.1, 2.1;
             layerno: 2;
           }
         }
-        # drawGame (a.k.a. no-decision round) intentionally falls through
-        # with _gained_exp left at 0 and no popup text.
       }
 
       if map(_gained_exp) > 0 {
         map(rpg_exp) := map(rpg_exp) + map(_gained_exp);
       }
 
-      # ===== LEVEL UP (single popup even for multi-level jumps) =====
+      # ----- Level up (single popup even for multi-level jumps) -----
       map(_levels_gained) := 0;
-      while map(rpg_exp) >= map(rpg_exp_next) {
-        map(rpg_exp)       := map(rpg_exp) - map(rpg_exp_next);
-        map(rpg_level)     := map(rpg_level) + 1;
-        map(rpg_atk)       := map(rpg_atk) + 3;
-        map(rpg_def)       := map(rpg_def) + 2;
-        map(rpg_exp_next)  := 18 + (map(rpg_level) * 6);
-        map(_levels_gained):= map(_levels_gained) + 1;
+      while map(rpg_exp) >= map(rpg_exp_next) && map(rpg_level) < 100 {
+        map(rpg_exp)        := map(rpg_exp) - map(rpg_exp_next);
+        map(rpg_level)      := map(rpg_level) + 1;
+        map(rpg_atk)        := map(rpg_atk) + 3;
+        map(rpg_def)        := map(rpg_def) + 2;
+        map(rpg_exp_next)   := 20 + floor(0.40803 * map(rpg_level) * map(rpg_level) * map(rpg_level));
+        map(_levels_gained) := map(_levels_gained) + 1;
+      }
+      if map(rpg_level) >= 100 {
+        map(rpg_exp) := 0;
       }
       if map(_levels_gained) = 1 {
         text{
@@ -150,25 +203,194 @@ ignoreHitPause if isHelper {
         }
       }
 
-      # Save to main save folder
+      # ----- Rank up -----
+      map(_rank_now) := 1;
+      if map(rpg_level) >= 5  { map(_rank_now) := 2; }
+      if map(rpg_level) >= 10 { map(_rank_now) := 3; }
+      if map(rpg_level) >= 15 { map(_rank_now) := 4; }
+      if map(rpg_level) >= 20 { map(_rank_now) := 5; }
+      if map(rpg_level) >= 30 { map(_rank_now) := 6; }
+      if map(rpg_level) >= 40 { map(_rank_now) := 7; }
+      if map(_rank_now) > map(rpg_rank) {
+        map(rpg_rank) := map(_rank_now);
+        text{
+          removetime: 180;
+          text: "NEW RANK!";
+          font: 0;
+          pos: 360, 400;
+          align: 0;
+          scale: 2.6, 2.6;
+          layerno: 2;
+        }
+      }
+
+      # ----- Save to THIS character's own file -----
       saveFile{
         savedata: map;
-        path: "../../save/rpg_data.gob";
+        path: "rpg_data.gob";
       }
     }
 
     # ===== BOTTOM HUD =====
     if roundState >= 2 {
-      text{
-        removetime: 2;
-        text: "Lv.%d   EXP %d/%d   STR %d   DEF %d";
-        params: map(rpg_level), map(rpg_exp), map(rpg_exp_next), map(rpg_atk), map(rpg_def);
-        font: -1;
-        pos: 10, screenHeight - 86;
-        align: 1;
-        scale: 1.0, 1.0;
-        layerno: 2;
+
+      #=====================================================================
+      #  HUD POSITION SETTINGS - EDIT THESE NUMBERS
+      #  rx,ry = Rank line   lx,ly = Level/EXP line   sx,sy = STR/DEF line
+      #  al = alignment (1 = left-aligned, -1 = right-aligned)
+      #  sc = text scale     o = outline thickness in pixels
+      #=====================================================================
+      map(_sc) := 1.0;
+      map(_o)  := 1;
+
+      # ---------- PLAYER 1 (left) ----------
+      if playerNo = 1 {
+        map(_al) := 1;
+        map(_rx) := 10;  map(_ry) := screenHeight-100;
+        map(_lx) := 10;  map(_ly) := screenHeight-88;
+        map(_sx) := 10;  map(_sy) := screenHeight-76;
       }
+      # ---------- PLAYER 2 (right) ----------
+      if playerNo = 2 {
+        map(_al) := -1;
+        map(_rx) := screenWidth--950;  map(_ry) := screenHeight-90;
+        map(_lx) := screenWidth--950;  map(_ly) := screenHeight-78;
+        map(_sx) := screenWidth--950;  map(_sy) := screenHeight-66;
+      }
+      # ---------- PLAYER 3 (left) ----------
+      if playerNo = 3 {
+        map(_al) := 1;
+        map(_rx) := 10;  map(_ry) := screenHeight-160;
+        map(_lx) := 10;  map(_ly) := screenHeight-148;
+        map(_sx) := 10;  map(_sy) := screenHeight-136;
+      }
+      # ---------- PLAYER 4 (right) ----------
+      if playerNo = 4 {
+        map(_al) := -1;
+        map(_rx) := screenWidth--950;  map(_ry) := screenHeight-160;
+        map(_lx) := screenWidth--950;  map(_ly) := screenHeight-148;
+        map(_sx) := screenWidth--950;  map(_sy) := screenHeight-136;
+      }
+      #=====================================================================
+
+      # ----- DEBUG (remove the leading # to show sex/female/rank on screen) -----
+      # text{ removetime: 2; text: "sex=%.0f fem=%.0f rank=%.0f"; params: map(sex), map(_female), map(rpg_rank); font: -1; pos: 10, 20; scale: 1,1; layerno: 2; }
+
+      # ---------- Rank nickname: black outline (layer 1) + white (layer 2) ----------
+      # MALE
+      if map(_female) = 0 && map(rpg_rank) = 1 {
+        text{ removetime: 2; text: "Rank: Rookie";   font: -1; pos: map(_rx)-map(_o), map(_ry); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+        text{ removetime: 2; text: "Rank: Rookie";   font: -1; pos: map(_rx)+map(_o), map(_ry); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+        text{ removetime: 2; text: "Rank: Rookie";   font: -1; pos: map(_rx), map(_ry)-map(_o); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+        text{ removetime: 2; text: "Rank: Rookie";   font: -1; pos: map(_rx), map(_ry)+map(_o); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+        text{ removetime: 2; text: "Rank: Rookie";   font: -1; pos: map(_rx), map(_ry);         align: map(_al); scale: map(_sc), map(_sc); color: 255,255,255; layerno: 2; }
+      }
+      if map(_female) = 0 && map(rpg_rank) = 2 {
+        text{ removetime: 2; text: "Rank: Fighter";  font: -1; pos: map(_rx)-map(_o), map(_ry); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+        text{ removetime: 2; text: "Rank: Fighter";  font: -1; pos: map(_rx)+map(_o), map(_ry); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+        text{ removetime: 2; text: "Rank: Fighter";  font: -1; pos: map(_rx), map(_ry)-map(_o); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+        text{ removetime: 2; text: "Rank: Fighter";  font: -1; pos: map(_rx), map(_ry)+map(_o); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+        text{ removetime: 2; text: "Rank: Fighter";  font: -1; pos: map(_rx), map(_ry);         align: map(_al); scale: map(_sc), map(_sc); color: 255,255,255; layerno: 2; }
+      }
+      if map(_female) = 0 && map(rpg_rank) = 3 {
+        text{ removetime: 2; text: "Rank: Veteran";  font: -1; pos: map(_rx)-map(_o), map(_ry); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+        text{ removetime: 2; text: "Rank: Veteran";  font: -1; pos: map(_rx)+map(_o), map(_ry); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+        text{ removetime: 2; text: "Rank: Veteran";  font: -1; pos: map(_rx), map(_ry)-map(_o); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+        text{ removetime: 2; text: "Rank: Veteran";  font: -1; pos: map(_rx), map(_ry)+map(_o); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+        text{ removetime: 2; text: "Rank: Veteran";  font: -1; pos: map(_rx), map(_ry);         align: map(_al); scale: map(_sc), map(_sc); color: 255,255,255; layerno: 2; }
+      }
+      if map(_female) = 0 && map(rpg_rank) = 4 {
+        text{ removetime: 2; text: "Rank: Elite";    font: -1; pos: map(_rx)-map(_o), map(_ry); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+        text{ removetime: 2; text: "Rank: Elite";    font: -1; pos: map(_rx)+map(_o), map(_ry); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+        text{ removetime: 2; text: "Rank: Elite";    font: -1; pos: map(_rx), map(_ry)-map(_o); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+        text{ removetime: 2; text: "Rank: Elite";    font: -1; pos: map(_rx), map(_ry)+map(_o); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+        text{ removetime: 2; text: "Rank: Elite";    font: -1; pos: map(_rx), map(_ry);         align: map(_al); scale: map(_sc), map(_sc); color: 255,255,255; layerno: 2; }
+      }
+      if map(_female) = 0 && map(rpg_rank) = 5 {
+        text{ removetime: 2; text: "Rank: Champion"; font: -1; pos: map(_rx)-map(_o), map(_ry); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+        text{ removetime: 2; text: "Rank: Champion"; font: -1; pos: map(_rx)+map(_o), map(_ry); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+        text{ removetime: 2; text: "Rank: Champion"; font: -1; pos: map(_rx), map(_ry)-map(_o); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+        text{ removetime: 2; text: "Rank: Champion"; font: -1; pos: map(_rx), map(_ry)+map(_o); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+        text{ removetime: 2; text: "Rank: Champion"; font: -1; pos: map(_rx), map(_ry);         align: map(_al); scale: map(_sc), map(_sc); color: 255,255,255; layerno: 2; }
+      }
+      if map(_female) = 0 && map(rpg_rank) = 6 {
+        text{ removetime: 2; text: "Rank: Master";   font: -1; pos: map(_rx)-map(_o), map(_ry); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+        text{ removetime: 2; text: "Rank: Master";   font: -1; pos: map(_rx)+map(_o), map(_ry); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+        text{ removetime: 2; text: "Rank: Master";   font: -1; pos: map(_rx), map(_ry)-map(_o); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+        text{ removetime: 2; text: "Rank: Master";   font: -1; pos: map(_rx), map(_ry)+map(_o); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+        text{ removetime: 2; text: "Rank: Master";   font: -1; pos: map(_rx), map(_ry);         align: map(_al); scale: map(_sc), map(_sc); color: 255,255,255; layerno: 2; }
+      }
+      if map(_female) = 0 && map(rpg_rank) = 7 {
+        text{ removetime: 2; text: "Rank: Legend";   font: -1; pos: map(_rx)-map(_o), map(_ry); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+        text{ removetime: 2; text: "Rank: Legend";   font: -1; pos: map(_rx)+map(_o), map(_ry); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+        text{ removetime: 2; text: "Rank: Legend";   font: -1; pos: map(_rx), map(_ry)-map(_o); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+        text{ removetime: 2; text: "Rank: Legend";   font: -1; pos: map(_rx), map(_ry)+map(_o); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+        text{ removetime: 2; text: "Rank: Legend";   font: -1; pos: map(_rx), map(_ry);         align: map(_al); scale: map(_sc), map(_sc); color: 255,255,255; layerno: 2; }
+      }
+      # FEMALE
+      if map(_female) = 1 && map(rpg_rank) = 1 {
+        text{ removetime: 2; text: "Rank: Maiden";   font: -1; pos: map(_rx)-map(_o), map(_ry); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+        text{ removetime: 2; text: "Rank: Maiden";   font: -1; pos: map(_rx)+map(_o), map(_ry); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+        text{ removetime: 2; text: "Rank: Maiden";   font: -1; pos: map(_rx), map(_ry)-map(_o); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+        text{ removetime: 2; text: "Rank: Maiden";   font: -1; pos: map(_rx), map(_ry)+map(_o); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+        text{ removetime: 2; text: "Rank: Maiden";   font: -1; pos: map(_rx), map(_ry);         align: map(_al); scale: map(_sc), map(_sc); color: 255,255,255; layerno: 2; }
+      }
+      if map(_female) = 1 && map(rpg_rank) = 2 {
+        text{ removetime: 2; text: "Rank: Huntress"; font: -1; pos: map(_rx)-map(_o), map(_ry); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+        text{ removetime: 2; text: "Rank: Huntress"; font: -1; pos: map(_rx)+map(_o), map(_ry); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+        text{ removetime: 2; text: "Rank: Huntress"; font: -1; pos: map(_rx), map(_ry)-map(_o); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+        text{ removetime: 2; text: "Rank: Huntress"; font: -1; pos: map(_rx), map(_ry)+map(_o); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+        text{ removetime: 2; text: "Rank: Huntress"; font: -1; pos: map(_rx), map(_ry);         align: map(_al); scale: map(_sc), map(_sc); color: 255,255,255; layerno: 2; }
+      }
+      if map(_female) = 1 && map(rpg_rank) = 3 {
+        text{ removetime: 2; text: "Rank: Heroine";  font: -1; pos: map(_rx)-map(_o), map(_ry); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+        text{ removetime: 2; text: "Rank: Heroine";  font: -1; pos: map(_rx)+map(_o), map(_ry); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+        text{ removetime: 2; text: "Rank: Heroine";  font: -1; pos: map(_rx), map(_ry)-map(_o); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+        text{ removetime: 2; text: "Rank: Heroine";  font: -1; pos: map(_rx), map(_ry)+map(_o); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+        text{ removetime: 2; text: "Rank: Heroine";  font: -1; pos: map(_rx), map(_ry);         align: map(_al); scale: map(_sc), map(_sc); color: 255,255,255; layerno: 2; }
+      }
+      if map(_female) = 1 && map(rpg_rank) = 4 {
+        text{ removetime: 2; text: "Rank: Valkyrie"; font: -1; pos: map(_rx)-map(_o), map(_ry); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+        text{ removetime: 2; text: "Rank: Valkyrie"; font: -1; pos: map(_rx)+map(_o), map(_ry); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+        text{ removetime: 2; text: "Rank: Valkyrie"; font: -1; pos: map(_rx), map(_ry)-map(_o); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+        text{ removetime: 2; text: "Rank: Valkyrie"; font: -1; pos: map(_rx), map(_ry)+map(_o); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+        text{ removetime: 2; text: "Rank: Valkyrie"; font: -1; pos: map(_rx), map(_ry);         align: map(_al); scale: map(_sc), map(_sc); color: 255,255,255; layerno: 2; }
+      }
+      if map(_female) = 1 && map(rpg_rank) = 5 {
+        text{ removetime: 2; text: "Rank: Queen";    font: -1; pos: map(_rx)-map(_o), map(_ry); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+        text{ removetime: 2; text: "Rank: Queen";    font: -1; pos: map(_rx)+map(_o), map(_ry); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+        text{ removetime: 2; text: "Rank: Queen";    font: -1; pos: map(_rx), map(_ry)-map(_o); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+        text{ removetime: 2; text: "Rank: Queen";    font: -1; pos: map(_rx), map(_ry)+map(_o); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+        text{ removetime: 2; text: "Rank: Queen";    font: -1; pos: map(_rx), map(_ry);         align: map(_al); scale: map(_sc), map(_sc); color: 255,255,255; layerno: 2; }
+      }
+      if map(_female) = 1 && map(rpg_rank) = 6 {
+        text{ removetime: 2; text: "Rank: Empress";  font: -1; pos: map(_rx)-map(_o), map(_ry); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+        text{ removetime: 2; text: "Rank: Empress";  font: -1; pos: map(_rx)+map(_o), map(_ry); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+        text{ removetime: 2; text: "Rank: Empress";  font: -1; pos: map(_rx), map(_ry)-map(_o); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+        text{ removetime: 2; text: "Rank: Empress";  font: -1; pos: map(_rx), map(_ry)+map(_o); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+        text{ removetime: 2; text: "Rank: Empress";  font: -1; pos: map(_rx), map(_ry);         align: map(_al); scale: map(_sc), map(_sc); color: 255,255,255; layerno: 2; }
+      }
+      if map(_female) = 1 && map(rpg_rank) = 7 {
+        text{ removetime: 2; text: "Rank: Goddess";  font: -1; pos: map(_rx)-map(_o), map(_ry); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+        text{ removetime: 2; text: "Rank: Goddess";  font: -1; pos: map(_rx)+map(_o), map(_ry); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+        text{ removetime: 2; text: "Rank: Goddess";  font: -1; pos: map(_rx), map(_ry)-map(_o); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+        text{ removetime: 2; text: "Rank: Goddess";  font: -1; pos: map(_rx), map(_ry)+map(_o); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+        text{ removetime: 2; text: "Rank: Goddess";  font: -1; pos: map(_rx), map(_ry);         align: map(_al); scale: map(_sc), map(_sc); color: 255,255,255; layerno: 2; }
+      }
+
+      # ---------- Line 2: Level + EXP ----------
+      text{ removetime: 2; text: "Lv.%.0f   EXP %.0f/%.0f"; params: map(rpg_level), map(rpg_exp), map(rpg_exp_next); font: -1; pos: map(_lx)-map(_o), map(_ly); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+      text{ removetime: 2; text: "Lv.%.0f   EXP %.0f/%.0f"; params: map(rpg_level), map(rpg_exp), map(rpg_exp_next); font: -1; pos: map(_lx)+map(_o), map(_ly); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+      text{ removetime: 2; text: "Lv.%.0f   EXP %.0f/%.0f"; params: map(rpg_level), map(rpg_exp), map(rpg_exp_next); font: -1; pos: map(_lx), map(_ly)-map(_o); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+      text{ removetime: 2; text: "Lv.%.0f   EXP %.0f/%.0f"; params: map(rpg_level), map(rpg_exp), map(rpg_exp_next); font: -1; pos: map(_lx), map(_ly)+map(_o); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+      text{ removetime: 2; text: "Lv.%.0f   EXP %.0f/%.0f"; params: map(rpg_level), map(rpg_exp), map(rpg_exp_next); font: -1; pos: map(_lx), map(_ly);         align: map(_al); scale: map(_sc), map(_sc); color: 255,255,255; layerno: 2; }
+
+      # ---------- Line 3: STR + DEF ----------
+      text{ removetime: 2; text: "STR %.0f   DEF %.0f"; params: map(rpg_atk), map(rpg_def); font: -1; pos: map(_sx)-map(_o), map(_sy); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+      text{ removetime: 2; text: "STR %.0f   DEF %.0f"; params: map(rpg_atk), map(rpg_def); font: -1; pos: map(_sx)+map(_o), map(_sy); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+      text{ removetime: 2; text: "STR %.0f   DEF %.0f"; params: map(rpg_atk), map(rpg_def); font: -1; pos: map(_sx), map(_sy)-map(_o); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+      text{ removetime: 2; text: "STR %.0f   DEF %.0f"; params: map(rpg_atk), map(rpg_def); font: -1; pos: map(_sx), map(_sy)+map(_o); align: map(_al); scale: map(_sc), map(_sc); color: 0,0,0; layerno: 1; }
+      text{ removetime: 2; text: "STR %.0f   DEF %.0f"; params: map(rpg_atk), map(rpg_def); font: -1; pos: map(_sx), map(_sy);         align: map(_al); scale: map(_sc), map(_sc); color: 255,255,255; layerno: 2; }
     }
   }
 
@@ -177,47 +399,39 @@ ignoreHitPause if isHelper {
   # ============================================================
   if AILevel > 0 {
 
+    # Scale once per match, as soon as the human enemy has loaded its own
+    # save (or at roundState 1 as a fallback, e.g. CPU vs CPU).
     if map(_cpu_scaled) = 0 && roundState <= 1 {
+      if (enemy, map(_rpg_loaded)) = 1 || roundState = 1 {
 
-      # Read (not overwrite) the human player's current stats so CPU
-      # difficulty tracks how strong the player has actually grown.
-      loadFile{
-        savedata: map;
-        path: "../../save/rpg_data.gob";
+        # Read the opposing human character's CURRENT stats via redirect
+        map(_player_atk) := ifelse((enemy, map(rpg_atk)) > 0, enemy, map(rpg_atk), 100);
+        map(_player_def) := ifelse((enemy, map(rpg_def)) > 0, enemy, map(rpg_def), 100);
+
+        # Tier from arcade.maxmatches = 6,1,1,0,0,0,0,0,0,0
+        #   matchno 1-6 -> tier 1 (grunts)
+        #   matchno 7   -> tier 2 (sub-boss)
+        #   matchno 8+  -> tier 3 (final boss)
+        map(_match) := ifelse(matchno > 0, matchno, 1);
+        map(_tier)  := 3;
+        if map(_match) <= 6 { map(_tier) := 1; }
+        if map(_match) = 7  { map(_tier) := 2; }
+
+        if map(_tier) = 1 { map(_tier_mult) := 0.90; }
+        if map(_tier) = 2 { map(_tier_mult) := 1.15; }
+        if map(_tier) = 3 { map(_tier_mult) := 1.45; }
+
+        # Small per-fight randomness (+-~5%)
+        map(_rand_atk) := 0.95 + (random / 1000.0 * 0.15);
+        map(_rand_def) := 0.95 + (random / 1000.0 * 0.15);
+        map(_rand_hp)  := 0.95 + (random / 1000.0 * 0.15);
+
+        map(rpg_atk) := floor(map(_player_atk) * map(_tier_mult) * map(_rand_atk));
+        map(rpg_def) := floor(map(_player_def) * map(_tier_mult) * map(_rand_def));
+        map(rpg_hp)  := floor(1000 * map(_tier_mult) * map(_rand_hp));
+
+        map(_cpu_scaled) := 1;
       }
-      map(_player_atk) := ifelse(map(rpg_atk) > 0, map(rpg_atk), 100);
-      map(_player_def) := ifelse(map(rpg_def) > 0, map(rpg_def), 100);
-
-      # ----- Tier from arcade.maxmatches = 6,1,1,0,0,0,0,0,0,0 -----
-      # matchno 1-6  -> tier 1 (grunts)
-      # matchno 7    -> tier 2 (sub-boss)
-      # matchno 8+   -> tier 3 (final boss, toughest overall)
-      map(_match) := ifelse(matchno > 0, matchno, 1);
-      if map(_match) <= 6 {
-        map(_tier) := 1;
-      } else {
-        if map(_match) = 7 {
-          map(_tier) := 2;
-        } else {
-          map(_tier) := 3;
-        }
-      }
-
-      # Tier base multiplier (applied on top of the player's own stats)
-      if map(_tier) = 1 { map(_tier_mult) := 0.90; }
-      if map(_tier) = 2 { map(_tier_mult) := 1.15; }
-      if map(_tier) = 3 { map(_tier_mult) := 1.45; }
-
-      # Small per-fight randomness so same tier doesn't feel identical
-      map(_rand_atk) := 0.95 + (random / 1000.0 * 0.15);
-      map(_rand_def) := 0.95 + (random / 1000.0 * 0.15);
-      map(_rand_hp)  := 0.95 + (random / 1000.0 * 0.15);
-
-      map(rpg_atk) := floor(map(_player_atk) * map(_tier_mult) * map(_rand_atk));
-      map(rpg_def) := floor(map(_player_def) * map(_tier_mult) * map(_rand_def));
-      map(rpg_hp)  := floor(1000 * map(_tier_mult) * map(_rand_hp));
-
-      map(_cpu_scaled) := 1;
     }
 
     if map(_cpu_scaled) = 1 {
